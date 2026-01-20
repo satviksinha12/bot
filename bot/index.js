@@ -6,6 +6,54 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 /**
+ * FIREBASE INITIALIZATION (Global Scope)
+ */
+function fixKey(key) {
+    if (!key) return null;
+    let k = key.trim();
+    if (k.startsWith('"') && k.endsWith('"')) k = k.substring(1, k.length - 1);
+    k = k.replace(/\\n/g, '\n');
+
+    // HEALER: If IBM turned the multi-line key into a single line with spaces,
+    // OpenSSL 3 / Node 22 will crash. We re-insert the standard PEM structure.
+    if (k.includes('-----BEGIN PRIVATE KEY-----') && !k.includes('\n', 30)) {
+        console.log("🛠️ Healing one-line PEM key...");
+        const header = '-----BEGIN PRIVATE KEY-----';
+        const footer = '-----END PRIVATE KEY-----';
+        let body = k.replace(header, '').replace(footer, '').replace(/\s/g, '');
+        const lines = body.match(/.{1,64}/g) || [];
+        k = `${header}\n${lines.join('\n')}\n${footer}\n`;
+    }
+    return k;
+}
+
+if (!admin.apps.length) {
+    try {
+        console.log("🔥 Initializing Global Firebase Admin...");
+        const privateKey = fixKey(process.env.V2S_FIREBASE_PRIVATE_KEY);
+
+        if (privateKey) {
+            console.log("🔑 DB Key processed (Length:", privateKey.length, ")");
+        }
+
+        admin.initializeApp({
+            credential: admin.credential.cert({
+                projectId: process.env.V2S_FIREBASE_PROJECT_ID,
+                clientEmail: process.env.V2S_FIREBASE_CLIENT_EMAIL,
+                privateKey: privateKey,
+            }),
+            databaseURL: process.env.V2S_FIREBASE_DATABASE_URL
+        });
+        console.log("✅ Firebase Admin READY.");
+    } catch (err) {
+        console.error("💥 CRITICAL: Firebase Init Failed:", err.message);
+    }
+}
+
+const db = admin.firestore();
+const rtdb = admin.database();
+
+/**
  * MIDDLEWARE: Raw Body Capture
  * Discord signature verification requires the UNMODIFIED raw body bytes.
  */
@@ -64,44 +112,16 @@ app.post('/', async (req, res) => {
         return res.json({ type: InteractionResponseType.PONG });
     }
 
-    // 3. Initialize Firebase
-    if (!admin.apps.length) {
-        try {
-            console.log("🔥 Initializing Firebase Admin...");
-            let privateKey = process.env.V2S_FIREBASE_PRIVATE_KEY;
-
-            if (!privateKey) {
-                console.error("❌ V2S_FIREBASE_PRIVATE_KEY is missing!");
-            } else {
-                // Robust cleaning: Handle quotes, whitespace, and escaped newlines
-                privateKey = privateKey.trim();
-                if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
-                    privateKey = privateKey.substring(1, privateKey.length - 1);
-                }
-                privateKey = privateKey.replace(/\\n/g, '\n');
-
-                console.log("🔑 Private Key processed (Length:", privateKey.length, ")");
-            }
-
-            admin.initializeApp({
-                credential: admin.credential.cert({
-                    projectId: process.env.V2S_FIREBASE_PROJECT_ID,
-                    clientEmail: process.env.V2S_FIREBASE_CLIENT_EMAIL,
-                    privateKey: privateKey,
-                }),
-                databaseURL: process.env.V2S_FIREBASE_DATABASE_URL
-            });
-            console.log("✅ Firebase Admin Initialized Successfully.");
-        } catch (err) {
-            console.error("💥 Firebase Init Error:", err.message);
-        }
-    }
-    const db = admin.firestore();
-    const rtdb = admin.database();
-
-    // 4. Handle Commands
+    // 3. Command Execution
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
         const { name } = interaction.data;
+        console.log(`🤖 Command Executing: /${name}`);
+
+        // Ensure shared Firebase is ready
+        if (!admin.apps.length) {
+            console.error("❌ Firebase not initialized!");
+            return res.status(500).json({ error: "Database not ready" });
+        }
 
         if (name === 'ping') {
             return res.json({
