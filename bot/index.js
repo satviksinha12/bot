@@ -16,27 +16,31 @@ function fixKey(key) {
     let k = key.trim();
     console.log(`🔍 fixKey: Input length: ${k.length}`);
 
-    if (k.startsWith('"') && k.endsWith('"')) {
-        k = k.substring(1, k.length - 1);
-    }
+    // Convert string literal \n to actual newlines
     k = k.replace(/\\n/g, '\n');
 
-    if (k.includes('-----BEGIN PRIVATE KEY-----')) {
-        console.log("🛠️ fixKey: PEM header detected. Reconstructing standard format...");
-        const header = '-----BEGIN PRIVATE KEY-----';
-        const footer = '-----END PRIVATE KEY-----';
+    const header = '-----BEGIN PRIVATE KEY-----';
+    const footer = '-----END PRIVATE KEY-----';
 
-        // Remove headers/footers and ALL whitespace to get pure base64
-        let base64Part = k
-            .replace(header, '')
-            .replace(footer, '')
-            .replace(/\s/g, '');
+    if (k.includes(header)) {
+        console.log("🛠️ fixKey: PEM header detected. Reconstructing standard format...");
+
+        // Extract strictly what's between headers, ignoring any surrounding junk
+        const startIdx = k.indexOf(header) + header.length;
+        const endIdx = k.indexOf(footer);
+
+        if (endIdx === -1) {
+            console.error("❌ fixKey: No footer found!");
+            return k; // Fallback to raw
+        }
+
+        let base64Part = k.substring(startIdx, endIdx).replace(/\s/g, '');
 
         // Re-insert newlines every 64 characters (standard PEM)
         const lines = base64Part.match(/.{1,64}/g) || [];
         const cleanKey = `${header}\n${lines.join('\n')}\n${footer}\n`;
 
-        console.log(`✅ fixKey: Key healed. Final length: ${cleanKey.length}`);
+        console.log(`✅ fixKey: Key healed. Final length: ${cleanKey.length} (Lines: ${lines.length})`);
         return cleanKey;
     }
 
@@ -44,13 +48,16 @@ function fixKey(key) {
     return k;
 }
 
+// Global initialization flag
+let isFirebaseReady = false;
+
 if (!admin.apps.length) {
     try {
         console.log("🔥 Initializing Global Firebase Admin...");
         const privateKey = fixKey(process.env.V2S_FIREBASE_PRIVATE_KEY);
 
         if (privateKey) {
-            console.log("🔑 DB Key processed (Length:", privateKey.length, ")");
+            console.log("🔑 Hex of first 10 processed chars:", Buffer.from(privateKey.substring(0, 10)).toString('hex'));
         }
 
         admin.initializeApp({
@@ -61,14 +68,23 @@ if (!admin.apps.length) {
             }),
             databaseURL: process.env.V2S_FIREBASE_DATABASE_URL
         });
+        isFirebaseReady = true;
         console.log("✅ Firebase Admin READY.");
     } catch (err) {
         console.error("💥 CRITICAL: Firebase Init Failed:", err.message);
+        // Do NOT crash the process here so health checks can still pass
     }
 }
 
-const db = admin.firestore();
-const rtdb = admin.database();
+// Lazy accessors to prevent crashes
+function getDb() {
+    if (!isFirebaseReady) throw new Error("Firebase not initialized accurately (Check Key)");
+    return admin.firestore();
+}
+function getRtdb() {
+    if (!isFirebaseReady) throw new Error("Firebase not initialized accurately (Check Key)");
+    return admin.database();
+}
 
 /**
  * MIDDLEWARE: Raw Body Capture
@@ -134,48 +150,51 @@ app.post('/', async (req, res) => {
         const { name } = interaction.data;
         console.log(`🤖 Command Executing: /${name}`);
 
-        // Ensure shared Firebase is ready
-        if (!admin.apps.length) {
-            console.error("❌ Firebase not initialized!");
-            return res.status(500).json({ error: "Database not ready" });
+        if (!isFirebaseReady) {
+            return response(res, "⚠️ VA Database is currently offline (Key error). Please contact admin or check startup logs.");
         }
 
-        if (name === 'ping') {
-            return res.json({
-                type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-                data: { content: 'Pong! ✈️ IBM Application Dispatch is online.' }
-            });
-        }
+        try {
+            if (name === 'ping') {
+                return res.json({
+                    type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+                    data: { content: 'Pong! ✈️ IBM Application Dispatch is online.' }
+                });
+            }
 
-        if (name === 'who') {
-            const data = (await rtdb.ref('live_flights').once('value')).val();
-            if (!data) return response(res, "No pilots flying. 🛫");
-            const active = Object.values(data).filter(f => Date.now() - f.lastContact < 600000);
-            if (!active.length) return response(res, "No active pilots. 🛫");
-            const flightList = active.map(f => `**${f.callsign}**: ${f.dep} ➔ ${f.arr} | ${f.aircraft}`).join('\n');
-            return responseEmbed(res, "📡 Live Ops", 0x00AE86, `**${active.length}** pilots flying:\n\n${flightList}`);
-        }
+            if (name === 'who') {
+                const data = (await getRtdb().ref('live_flights').once('value')).val();
+                if (!data) return response(res, "No pilots flying. 🛫");
+                const active = Object.values(data).filter(f => Date.now() - f.lastContact < 600000);
+                if (!active.length) return response(res, "No active pilots. 🛫");
+                const flightList = active.map(f => `**${f.callsign}**: ${f.dep} ➔ ${f.arr} | ${f.aircraft}`).join('\n');
+                return responseEmbed(res, "📡 Live Ops", 0x00AE86, `**${active.length}** pilots flying:\n\n${flightList}`);
+            }
 
-        if (name === 'stats') {
-            const [pireps, users] = await Promise.all([db.collection('pireps').get(), db.collection('users').get()]);
-            let hours = 0;
-            pireps.forEach(d => {
-                const t = (d.data().stats && d.data().stats.flightTime) || d.data().flightTime || "0";
-                hours += t.includes(':') ? (parseInt(t.split(':')[0]) + parseInt(t.split(':')[1]) / 60) : (parseFloat(t) || 0);
-            });
-            return responseEmbed(res, "📊 VA Stats", 0x5865F2, `Pilots: ${users.size} | Flights: ${pireps.size} | Hours: ${Math.round(hours)}`);
-        }
+            if (name === 'stats') {
+                const [pireps, users] = await Promise.all([getDb().collection('pireps').get(), getDb().collection('users').get()]);
+                let hours = 0;
+                pireps.forEach(d => {
+                    const t = (d.data().stats && d.data().stats.flightTime) || d.data().flightTime || "0";
+                    hours += t.includes(':') ? (parseInt(t.split(':')[0]) + parseInt(t.split(':')[1]) / 60) : (parseFloat(t) || 0);
+                });
+                return responseEmbed(res, "📊 VA Stats", 0x5865F2, `Pilots: ${users.size} | Flights: ${pireps.size} | Hours: ${Math.round(hours)}`);
+            }
 
-        if (name === 'pilot') {
-            const options = interaction.data.options || [];
-            const username = options.length > 0 ? options[0].value : null;
-            if (!username) return response(res, "Please provide a pilot username.");
+            if (name === 'pilot') {
+                const options = interaction.data.options || [];
+                const username = options.length > 0 ? options[0].value : null;
+                if (!username) return response(res, "Please provide a pilot username.");
 
-            const snap = await db.collection('users').where('username', '==', username).limit(1).get();
-            if (snap.empty) return response(res, `Pilot ${username} not found.`);
-            const user = snap.docs[0].data();
-            const pSnap = await db.collection('pireps').where('username', '==', username).get();
-            return responseEmbed(res, `👨‍✈️ Profile: ${username}`, 0xf1c40f, `Flights: ${pSnap.size}`, user.profilePic);
+                const snap = await getDb().collection('users').where('username', '==', username).limit(1).get();
+                if (snap.empty) return response(res, `Pilot ${username} not found.`);
+                const user = snap.docs[0].data();
+                const pSnap = await getDb().collection('pireps').where('username', '==', username).get();
+                return responseEmbed(res, `👨‍✈️ Profile: ${username}`, 0xf1c40f, `Flights: ${pSnap.size}`, user.profilePic);
+            }
+        } catch (err) {
+            console.error(`💥 Error executing /${name}:`, err.message);
+            return response(res, `❌ Error accessing database: ${err.message}`);
         }
     }
 
