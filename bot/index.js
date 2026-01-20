@@ -9,21 +9,38 @@ const PORT = process.env.PORT || 8080;
  * FIREBASE INITIALIZATION (Global Scope)
  */
 function fixKey(key) {
-    if (!key) return null;
+    if (!key) {
+        console.log("❌ fixKey: Key is null or undefined");
+        return null;
+    }
     let k = key.trim();
-    if (k.startsWith('"') && k.endsWith('"')) k = k.substring(1, k.length - 1);
+    console.log(`🔍 fixKey: Input length: ${k.length}`);
+
+    if (k.startsWith('"') && k.endsWith('"')) {
+        k = k.substring(1, k.length - 1);
+    }
     k = k.replace(/\\n/g, '\n');
 
-    // HEALER: If IBM turned the multi-line key into a single line with spaces,
-    // OpenSSL 3 / Node 22 will crash. We re-insert the standard PEM structure.
-    if (k.includes('-----BEGIN PRIVATE KEY-----') && !k.includes('\n', 30)) {
-        console.log("🛠️ Healing one-line PEM key...");
+    if (k.includes('-----BEGIN PRIVATE KEY-----')) {
+        console.log("🛠️ fixKey: PEM header detected. Reconstructing standard format...");
         const header = '-----BEGIN PRIVATE KEY-----';
         const footer = '-----END PRIVATE KEY-----';
-        let body = k.replace(header, '').replace(footer, '').replace(/\s/g, '');
-        const lines = body.match(/.{1,64}/g) || [];
-        k = `${header}\n${lines.join('\n')}\n${footer}\n`;
+
+        // Remove headers/footers and ALL whitespace to get pure base64
+        let base64Part = k
+            .replace(header, '')
+            .replace(footer, '')
+            .replace(/\s/g, '');
+
+        // Re-insert newlines every 64 characters (standard PEM)
+        const lines = base64Part.match(/.{1,64}/g) || [];
+        const cleanKey = `${header}\n${lines.join('\n')}\n${footer}\n`;
+
+        console.log(`✅ fixKey: Key healed. Final length: ${cleanKey.length}`);
+        return cleanKey;
     }
+
+    console.log("⚠️ fixKey: No header found. Returning processed raw string.");
     return k;
 }
 
