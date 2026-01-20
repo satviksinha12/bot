@@ -40,31 +40,60 @@ app.post('/', async (req, res) => {
     console.log("- Public Key status:", !!PUBLIC_KEY ? 'Loaded' : 'MISSING');
 
     // 1. Verify Signature
-    if (!signature || !timestamp || !verifyKey(body, signature, timestamp, PUBLIC_KEY)) {
-        console.error("❌ DISCORD SIG VERIFICATION FAILED");
-        return res.status(401).send('Invalid request signature');
+    try {
+        console.log("💎 Calling verifyKey...");
+        const isValid = verifyKey(body, signature, timestamp, PUBLIC_KEY);
+        console.log("💎 Verification result:", isValid);
+
+        if (!isValid) {
+            console.error("❌ DISCORD SIG VERIFICATION FAILED");
+            return res.status(401).send('Invalid request signature');
+        }
+    } catch (err) {
+        console.error("💥 CRASH during verifyKey:", err.message);
+        return res.status(500).send('Internal verification error');
     }
 
+    console.log("✅ VERIFICATION SUCCESS. Parsing interaction...");
     const interaction = req.body;
+    console.log("ℹ️ Interaction Type:", interaction.type);
 
-    // 2. Handle PING
+    // 2. Handle PING (Discord verification check)
     if (interaction.type === InteractionType.PING) {
+        console.log("👋 PING received. Sending PONG...");
         return res.json({ type: InteractionResponseType.PONG });
     }
 
     // 3. Initialize Firebase
     if (!admin.apps.length) {
         try {
+            console.log("🔥 Initializing Firebase Admin...");
+            let privateKey = process.env.V2S_FIREBASE_PRIVATE_KEY;
+
+            if (!privateKey) {
+                console.error("❌ V2S_FIREBASE_PRIVATE_KEY is missing!");
+            } else {
+                // Robust cleaning: Handle quotes, whitespace, and escaped newlines
+                privateKey = privateKey.trim();
+                if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+                    privateKey = privateKey.substring(1, privateKey.length - 1);
+                }
+                privateKey = privateKey.replace(/\\n/g, '\n');
+
+                console.log("🔑 Private Key processed (Length:", privateKey.length, ")");
+            }
+
             admin.initializeApp({
                 credential: admin.credential.cert({
                     projectId: process.env.V2S_FIREBASE_PROJECT_ID,
                     clientEmail: process.env.V2S_FIREBASE_CLIENT_EMAIL,
-                    privateKey: process.env.V2S_FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+                    privateKey: privateKey,
                 }),
                 databaseURL: process.env.V2S_FIREBASE_DATABASE_URL
             });
+            console.log("✅ Firebase Admin Initialized Successfully.");
         } catch (err) {
-            console.error("Firebase Init Error:", err.message);
+            console.error("💥 Firebase Init Error:", err.message);
         }
     }
     const db = admin.firestore();
