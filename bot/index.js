@@ -26,11 +26,18 @@ app.get('/', (req, res) => {
  * INTERACTION ENDPOINT (POST)
  */
 app.post('/', async (req, res) => {
+    console.log("📩 Discord POST interaction received");
+
     const signature = req.get('X-Signature-Ed25519');
     const timestamp = req.get('X-Signature-Timestamp');
     const body = req.rawBody;
-
     const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
+
+    console.log("🔍 Verification details:");
+    console.log("- Signature present:", !!signature);
+    console.log("- Timestamp present:", !!timestamp);
+    console.log("- Raw Body present:", !!body, body ? `(Size: ${body.length})` : "");
+    console.log("- Public Key status:", !!PUBLIC_KEY ? 'Loaded' : 'MISSING');
 
     // 1. Verify Signature
     if (!signature || !timestamp || !verifyKey(body, signature, timestamp, PUBLIC_KEY)) {
@@ -129,5 +136,6 @@ function responseEmbed(res, title, color, description, thumb) {
 }
 
 app.listen(PORT, () => {
-    console.log(`✅ Bot app listening on port ${PORT}`);
+    console.log(`✅ Bot server is UP and listening on port ${PORT}`);
+    console.log(`🔑 DISCORD_PUBLIC_KEY status: ${process.env.DISCORD_PUBLIC_KEY ? 'Present' : 'MISSING'}`);
 });
